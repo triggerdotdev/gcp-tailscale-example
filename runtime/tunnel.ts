@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { SocksClient } from "socks";
@@ -10,7 +11,34 @@ const SOCKET = `${STATE_DIR}/tailscaled.sock`;
 
 export const tunnelProxy = { host: SOCKS_HOST, port: SOCKS_PORT, type: 5 as const };
 
+export type TunnelTiming = {
+  reusedProcess: boolean;
+  reusedDaemon: boolean;
+  setupMs: number;
+  spawnToPortMs?: number;
+  upMs?: number;
+};
+
 let readyPromise: Promise<void> | undefined;
+let lastTiming: TunnelTiming | undefined;
+let lastAwaitMs = 0;
+
+/** Timing of the actual tunnel bring-up (from start()), for measurement. */
+export function getTunnelTiming(): TunnelTiming | undefined {
+  return lastTiming;
+}
+
+/** Observed time the most recent awaitTunnelTimed() blocked (the cold cost seen by the run). */
+export function getAwaitMs(): number {
+  return lastAwaitMs;
+}
+
+/** Await the tunnel, recording how long the caller actually blocked. */
+export async function awaitTunnelTimed(): Promise<void> {
+  const t = Date.now();
+  await ensureTunnel();
+  lastAwaitMs = Date.now() - t;
+}
 
 /**
  * Idempotently start userspace `tailscaled`, authenticate with TS_AUTHKEY, and
@@ -18,20 +46,46 @@ let readyPromise: Promise<void> | undefined;
  * starts the daemon once and reuses it across runs.
  */
 export function ensureTunnel(): Promise<void> {
-  if (!readyPromise) {
-    readyPromise = start().catch((err) => {
-      readyPromise = undefined;
-      throw err;
-    });
+  if (readyPromise) {
+    return readyPromise;
   }
+  readyPromise = start().catch((err) => {
+    readyPromise = undefined;
+    throw err;
+  });
   return readyPromise;
+}
+
+/**
+ * Verify the tunnel is healthy (backend Running + proxy port open) and rebuild
+ * it if not. Used after checkpoint/restore, where the frozen daemon may need to
+ * re-establish. Returns whether a reconnect was required.
+ */
+export async function ensureTunnelHealthy(): Promise<{
+  reconnected: boolean;
+  stateBefore: string | null;
+  stateAfter: string | null;
+}> {
+  const stateBefore = await backendState();
+  const portOk = await isPortOpen(SOCKS_HOST, SOCKS_PORT);
+  if (stateBefore === "Running" && portOk) {
+    return { reconnected: false, stateBefore, stateAfter: stateBefore };
+  }
+  readyPromise = undefined;
+  await ensureTunnel();
+  return { reconnected: true, stateBefore, stateAfter: await backendState() };
 }
 
 async function start(): Promise<void> {
   const authKey = process.env.TS_AUTHKEY;
   if (!authKey) throw new Error("TS_AUTHKEY is not set");
 
+  const t0 = Date.now();
+  let reusedDaemon = false;
+  let spawnToPortMs: number | undefined;
+
   if (!(await daemonAlive())) {
+    const spawnT = Date.now();
     const daemon = spawn(
       "tailscaled",
       [
@@ -45,10 +99,13 @@ async function start(): Promise<void> {
     );
     daemon.on("exit", (code) => console.error(`[tunnel] tailscaled exited: ${code}`));
     await waitForPort(SOCKS_HOST, SOCKS_PORT, 15_000);
+    spawnToPortMs = Date.now() - spawnT;
   } else {
+    reusedDaemon = true;
     console.log("[tunnel] reusing tailscaled already running in this worker");
   }
 
+  const upT = Date.now();
   if ((await backendState()) !== "Running") {
     await run("tailscale", [
       `--socket=${SOCKET}`,
@@ -62,11 +119,25 @@ async function start(): Promise<void> {
 
   await waitForBackendRunning(30_000);
   await waitForPort(SOCKS_HOST, SOCKS_PORT, 15_000);
-  console.log("[tunnel] tailnet up; SOCKS5 proxy ready on " + `${SOCKS_HOST}:${SOCKS_PORT}`);
+  const upMs = Date.now() - upT;
+
+  lastTiming = { reusedProcess: false, reusedDaemon, setupMs: Date.now() - t0, spawnToPortMs, upMs };
+  console.log("[tunnel] ready timing=" + JSON.stringify(lastTiming));
 }
 
 async function daemonAlive(): Promise<boolean> {
+  if (!existsSync(SOCKET)) return false;
   return (await backendState()) !== null;
+}
+
+function isPortOpen(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = net.connect(port, host, () => {
+      s.destroy();
+      resolve(true);
+    });
+    s.on("error", () => resolve(false));
+  });
 }
 
 async function backendState(): Promise<string | null> {

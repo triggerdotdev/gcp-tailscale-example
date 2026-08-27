@@ -3,11 +3,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@clickhouse/client": "^1.9.0",
     "@trigger.dev/sdk": "4.5.12",
     "pg": "^8.13.1",
-    "socks": "^2.8.3",
-    "socks-proxy-agent": "^8.0.4"
+    "socks": "^2.8.3"
   },
   "devDependencies": {
     "@trigger.dev/build": "4.5.12",

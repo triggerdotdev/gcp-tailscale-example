@@ -1,0 +1,69 @@
+name: wg-tunnel-proof
+
+networks:
+  aws_public:
+    driver: bridge
+  gcp_private:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.50.0.0/24
+
+volumes:
+  keys:
+
+services:
+  keygen:
+    image: alpine:3.20
+    volumes:
+      - keys:/keys
+    command:
+      - sh
+      - -c
+      - "apk add -q wireguard-tools; cd /keys; [ -f server.key ] || (wg genkey | tee server.key | wg pubkey > server.pub); [ -f client.key ] || (wg genkey | tee client.key | wg pubkey > client.pub); chmod -R a+r /keys; echo keygen-done"
+
+  pg:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    networks:
+      gcp_private:
+        ipv4_address: 10.50.0.2
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  wgserver:
+    build: ./wgserver
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    volumes:
+      - keys:/keys
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+    networks:
+      aws_public:
+      gcp_private:
+        ipv4_address: 10.50.0.3
+
+  client:
+    build: ./client
+    user: node
+    cap_drop: [ALL]
+    volumes:
+      - keys:/keys
+    depends_on:
+      keygen:
+        condition: service_completed_successfully
+      pg:
+        condition: service_healthy
+      wgserver:
+        condition: service_started
+    networks: [aws_public]
