@@ -1,0 +1,21 @@
+{
+  "tagOwners": {
+    "tag:trigger": ["autogroup:admin"],
+    "tag:gcp-db": ["autogroup:admin"]
+  },
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["tag:trigger"],
+      "dst": ["tag:gcp-db:5432", "tag:gcp-db:8123"]
+    }
+  ],
+  "ssh": [
+    {
+      "action": "accept",
+      "src": ["autogroup:admin"],
+      "dst": ["tag:gcp-db"],
+      "users": ["autogroup:nonroot", "root"]
+    }
+  ]
+}

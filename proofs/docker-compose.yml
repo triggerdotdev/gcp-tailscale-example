@@ -1,0 +1,45 @@
+name: gcp-tunnel-proof
+
+networks:
+  aws_public:
+    driver: bridge
+  gcp_private:
+    driver: bridge
+    internal: true
+
+services:
+  pg:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    networks: [gcp_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ch:
+    image: python:3.12-slim
+    command: ["python", "-c", "import http.server,socketserver;socketserver.TCPServer(('0.0.0.0',8123),http.server.SimpleHTTPRequestHandler).serve_forever()"]
+    networks: [gcp_private]
+
+  router:
+    image: python:3.12-slim
+    volumes:
+      - ./socks5.py:/socks5.py:ro
+    command: ["python", "/socks5.py"]
+    networks: [aws_public, gcp_private]
+
+  task:
+    build: ./task
+    depends_on:
+      pg:
+        condition: service_healthy
+      router:
+        condition: service_started
+      ch:
+        condition: service_started
+    networks: [aws_public]

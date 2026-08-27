@@ -1,0 +1,10 @@
+{
+  "name": "tunnel-task-proof",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pg": "8.13.1",
+    "socks": "2.8.3",
+    "socks-proxy-agent": "8.0.4"
+  }
+}

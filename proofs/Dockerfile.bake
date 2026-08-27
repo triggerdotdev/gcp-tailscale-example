@@ -1,0 +1,27 @@
+# Reproduces EXACTLY what the tailscale build extension's `image.instructions`
+# would inject, layered on the real trigger.dev deployed base image.
+# Base + USER match packages/cli-v3/src/deploy/buildImage.ts (node runtime).
+FROM triggerdotdev/node:21-bookworm@sha256:49c6575cda32f63ac21a4aeaabc360dc50c6f767b86b675b44de7a9e9b6ca3fc AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- BEGIN: bytes the build extension adds via image.instructions ---
+ARG TS_VERSION=1.84.3
+ARG TARGETARCH=arm64
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+  && curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TARGETARCH}.tgz" -o /tmp/ts.tgz \
+  && tar -xzf /tmp/ts.tgz -C /tmp \
+  && cp /tmp/tailscale_${TS_VERSION}_${TARGETARCH}/tailscale /tmp/tailscale_${TS_VERSION}_${TARGETARCH}/tailscaled /usr/local/bin/ \
+  && chmod 755 /usr/local/bin/tailscale /usr/local/bin/tailscaled \
+  && mkdir -p /var/run/tailscale /tmp/ts-state \
+  && chown -R node:node /var/run/tailscale /tmp/ts-state \
+  && rm -rf /tmp/ts.tgz /tmp/tailscale_${TS_VERSION}_${TARGETARCH} \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
+# --- END injected bytes ---
+
+# final stage mirrors the generated Containerfile: FROM base, USER node, non-root
+FROM base AS final
+USER node
+WORKDIR /app
+COPY --chown=node:node start-tunnel-check.sh /app/start-tunnel-check.sh
+ENTRYPOINT ["dumb-init", "bash", "/app/start-tunnel-check.sh"]
