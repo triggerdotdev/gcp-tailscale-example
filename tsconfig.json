@@ -8,5 +8,5 @@
     "esModuleInterop": true,
     "types": ["node"]
   },
-  "include": ["src", "runtime", "extension", "trigger.config.ts"]
+  "include": ["src", "runtime", "extension", "wireguard", "trigger.config.ts"]
 }

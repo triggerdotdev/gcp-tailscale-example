@@ -1,40 +1,18 @@
 import { task } from "@trigger.dev/sdk";
-import pg from "pg";
-import { createClient } from "@clickhouse/client";
-import { SocksProxyAgent } from "socks-proxy-agent";
-import { tunnelSocket, tunnelProxy } from "../runtime/tunnel.js";
-
-const { Client } = pg;
+import { getTunnelTiming, getAwaitMs } from "../runtime/tunnel.js";
+import { pgSelect } from "../runtime/db.js";
 
 /**
- * Runs inside the deployed AWS worker; reaches the customer's GCP-private
- * Postgres and ClickHouse through the Tailscale userspace proxy. The middleware
- * in trigger.config.ts guarantees the tunnel is up before this body runs.
+ * Reaches the tailnet-private Postgres through the userspace tunnel and reports
+ * the tunnel setup timing (0 when the tunnel was reused across warm starts).
  */
 export const queryPrivateGcp = task({
   id: "query-private-gcp",
   run: async () => {
-    const pgClient = new Client({
-      user: process.env.PGUSER,
-      password: process.env.PGPASSWORD,
-      database: process.env.PGDATABASE,
-      stream: await tunnelSocket(process.env.PGHOST!, Number(process.env.PGPORT ?? 5432)),
-    });
-    await pgClient.connect();
-    const { rows } = await pgClient.query(
-      "select now() as ts, inet_server_addr() as ip, version() as version"
-    );
-    await pgClient.end();
+    const qStart = Date.now();
+    const rows = await pgSelect("select now() as ts, inet_server_addr() as ip, version() as version");
+    const queryMs = Date.now() - qStart;
 
-    let clickhouse: unknown = "skipped (no CLICKHOUSE_URL)";
-    if (process.env.CLICKHOUSE_URL) {
-      const agent = new SocksProxyAgent(`socks5h://${tunnelProxy.host}:${tunnelProxy.port}`);
-      const ch = createClient({ url: process.env.CLICKHOUSE_URL, http_agent: agent });
-      const rs = await ch.query({ query: "SELECT 1 AS ok", format: "JSONEachRow" });
-      clickhouse = await rs.json();
-      await ch.close();
-    }
-
-    return { postgres: rows[0], clickhouse };
+    return { postgres: rows[0], queryMs, awaitMs: getAwaitMs(), tunnel: getTunnelTiming() };
   },
 });
