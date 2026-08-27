@@ -35,6 +35,33 @@ the fastest cold start with no vendor limits. Tailscale when you want ACLs, easy
 key management, NAT traversal, and a managed control plane (and can wear the ~1s
 cold-start handshake, or self-host Headscale to shrink it).
 
+### What the NAT-traversal "no" means
+
+Plain WireGuard has no coordination server, hole-punching, or relay: a peer only
+sends packets to the `Endpoint` (IP:port) you configure. So at least one side must
+have a **reachable endpoint** — a public IP:port or a port-forward. It can't connect
+two peers that are both behind NAT with no dialable address. Tailscale does all of
+that (STUN-style hole-punching, DERP relay fallback, its coordination server
+brokering the path), so both peers can be fully private with no exposed port.
+
+**Why it doesn't hurt this setup:** the GCP side is given a reachable endpoint — the
+WireGuard server VM has a public IP with UDP 51820 opened. The task, behind AWS
+egress NAT, simply dials **outbound** to it, which NAT allows, and
+`PersistentKeepalive` holds the mapping open. One reachable endpoint plus an
+outbound dial is enough; no traversal needed.
+
+**When it would matter:**
+
+- You won't expose any inbound endpoint on the GCP side (no public IP, no open
+  port). Tailscale still works via DERP relay; plain WireGuard can't be dialed.
+- The GCP endpoint's IP is dynamic or roams — WireGuard's static `Endpoint` breaks;
+  Tailscale re-discovers it.
+
+Exposing UDP 51820 is low-risk: WireGuard silently drops any packet not from an
+authenticated peer and never replies to unauthenticated ones, so the port is
+effectively invisible to scanners. It's a requirement (you must own a reachable
+endpoint), not really an attack surface — that's the real tradeoff behind the "no".
+
 ## How it works
 
 1. A **build extension** bakes the userspace client (`tailscale`/`tailscaled`, or
