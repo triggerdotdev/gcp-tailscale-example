@@ -75,8 +75,79 @@ endpoint), not really an attack surface — that's the real tradeoff behind the 
    option. Traffic egresses through the tunnel to a node inside the VPC and on to
    the private resource.
 
+## Architecture
+
+### Tailscale path
+
+The task's userspace `tailscaled` registers with Tailscale's control plane on a
+cold start (the ~1.2s handshake), then carries data over WireGuard to a node in the
+VPC, directly or relayed via DERP.
+
+```mermaid
+flowchart LR
+  subgraph AWS["AWS - Trigger.dev managed worker"]
+    task["task run()"]
+    tsd["userspace tailscaled<br/>SOCKS5 :1055"]
+    task -->|"pg via stream"| tsd
+  end
+  coord["Tailscale control plane<br/>coordination + DERP"]
+  subgraph GCP["Customer GCP VPC"]
+    router["Tailscale node /<br/>subnet router"]
+    db[("private Postgres /<br/>Cloud SQL")]
+    router --> db
+  end
+  tsd -.->|"register + netmap<br/>cold handshake ~1.2s"| coord
+  tsd ==>|"WireGuard data<br/>direct or via DERP"| router
 ```
-[ Trigger.dev task (AWS) ] --userspace tunnel--> SOCKS5 --> [ node in the GCP VPC ] --> private Postgres / Cloud SQL
+
+### WireGuard path
+
+`wireproxy` does a single static handshake straight to the WireGuard server's public
+UDP endpoint (an outbound dial, ~0.1s), with no control plane in the path.
+
+```mermaid
+flowchart LR
+  subgraph AWS["AWS - Trigger.dev managed worker"]
+    task["task run()"]
+    wp["wireproxy<br/>userspace WireGuard + SOCKS5 :25344"]
+    task -->|"pg via stream"| wp
+  end
+  subgraph GCP["Customer GCP VPC"]
+    wgs["WireGuard server VM<br/>public UDP :51820"]
+    db[("private Postgres /<br/>Cloud SQL")]
+    wgs --> db
+  end
+  wp ==>|"static WG handshake<br/>outbound dial ~0.1s"| wgs
+```
+
+### Managed resource via a subnet router
+
+For a managed resource (Cloud SQL, private ClickHouse) the tunnel node acts as a
+subnet router, bridging the tunnel to the resource's private IP over VPC peering.
+
+```mermaid
+flowchart LR
+  t(["tunnel from task"]) --> r["subnet-router VM<br/>in the VPC"]
+  r ==>|"VPC peering"| cs[("managed Cloud SQL<br/>private IP only")]
+  r -.->|"WG: forward + masquerade<br/>Tailscale: advertise route + ACL grant"| cs
+```
+
+### Deploy and runtime
+
+```mermaid
+sequenceDiagram
+  participant D as deploy
+  participant B as build extension
+  participant W as deployed worker
+  participant T as tunnel client
+  participant DB as private DB
+  D->>B: trigger.dev deploy
+  B->>B: bake tunnel binary into image
+  Note over W: cold start
+  W->>T: middleware brings tunnel up (before run)
+  T-->>W: SOCKS5 ready
+  W->>DB: pg query via SOCKS5 over the tunnel
+  DB-->>W: rows
 ```
 
 ## Repo layout
